@@ -1,5 +1,5 @@
 import { useRouter } from 'next/router';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import io from 'socket.io-client';
 import ReactPlayer from 'react-player';
 import Peer from 'peerjs';
@@ -10,18 +10,25 @@ export default function Room() {
   const { id } = router.query;
   const [socket, setSocket] = useState(null);
   const [users, setUsers] = useState([]);
-  const [mediaUrl, setMediaUrl] = useState(null); // No default – starts empty
+  const [mediaUrl, setMediaUrl] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [myStream, setMyStream] = useState(null);
   const [peer, setPeer] = useState(null);
+  const [peerId, setPeerId] = useState(null); // store peer ID separately
   const [remoteStreams, setRemoteStreams] = useState({});
   const [buffering, setBuffering] = useState(false);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('media');
+  const [isPeerReady, setIsPeerReady] = useState(false);
   const playerRef = useRef(null);
   const myVideoRef = useRef(null);
   const userIdRef = useRef(Math.random().toString(36).substring(2, 8));
+
+  // Logging utility
+  const log = useCallback((...args) => {
+    console.log(`[${userIdRef.current}]`, ...args);
+  }, []);
 
   // Connect to Socket.io
   useEffect(() => {
@@ -31,35 +38,31 @@ export default function Room() {
       setError('Backend URL not configured');
       return;
     }
+    log('Connecting to backend:', backendUrl);
     const socket = io(backendUrl);
     setSocket(socket);
 
-    socket.on('connect', () => {
-      console.log('Socket connected');
-    });
-
+    socket.on('connect', () => log('Socket connected'));
     socket.on('room-state', (state) => {
-      console.log('Room state:', state);
-      // Only set mediaUrl if it's not null/empty
+      log('Room state:', state);
       setMediaUrl(state.mediaUrl || null);
       setIsPlaying(state.isPlaying);
       setCurrentTime(state.currentTime);
     });
-
     socket.on('existing-users', (existing) => {
+      log('Existing users:', existing);
       setUsers(existing);
     });
-
     socket.on('user-joined', (user) => {
+      log('User joined:', user);
       setUsers(prev => [...prev, user]);
     });
-
     socket.on('user-left', (userId) => {
+      log('User left:', userId);
       setUsers(prev => prev.filter(u => u.userId !== userId));
     });
-
     socket.on('sync', (state) => {
-      console.log('Sync:', state);
+      log('Sync:', state);
       setMediaUrl(state.mediaUrl || null);
       setIsPlaying(state.isPlaying);
       setCurrentTime(state.currentTime);
@@ -67,77 +70,126 @@ export default function Room() {
         playerRef.current.seekTo(state.currentTime, 'seconds');
       }
     });
-
     socket.on('signal', ({ fromPeerId, signal }) => {
-      if (peer) {
-        peer.call(fromPeerId, myStream);
+      log('Signal from:', fromPeerId, signal);
+      if (peer && myStream && isPeerReady) {
+        try {
+          const call = peer.call(fromPeerId, myStream);
+          call.on('stream', (remoteStream) => {
+            log('Received stream from', fromPeerId);
+            setRemoteStreams(prev => ({ ...prev, [fromPeerId]: remoteStream }));
+          });
+        } catch (err) {
+          log('Error answering call:', err);
+        }
       }
     });
-
     socket.on('connect_error', (err) => {
-      console.error('Socket error:', err);
+      log('Socket error:', err);
       setError('Failed to connect to server');
     });
 
-    return () => socket.disconnect();
-  }, [id]);
+    return () => {
+      log('Disconnecting socket');
+      socket.disconnect();
+    };
+  }, [id, log, peer, myStream, isPeerReady]);
 
   // Set up PeerJS
   useEffect(() => {
     if (!socket) return;
+    log('Initializing PeerJS');
     const peer = new Peer();
     setPeer(peer);
 
-    peer.on('open', (peerId) => {
+    peer.on('open', (id) => {
+      log('PeerJS open with ID:', id);
+      setPeerId(id);
+      setIsPeerReady(true);
+      // Join the room with our peerId
       socket.emit('join-room', {
         roomId: id,
         userId: userIdRef.current,
-        peerId
+        peerId: id
       });
     });
 
     peer.on('call', (call) => {
+      log('Incoming call from:', call.peer);
       if (myStream) {
         call.answer(myStream);
         call.on('stream', (remoteStream) => {
+          log('Stream received from', call.peer);
           setRemoteStreams(prev => ({ ...prev, [call.peer]: remoteStream }));
         });
+      } else {
+        log('No local stream to answer call');
       }
     });
 
     peer.on('error', (err) => {
-      console.error('PeerJS error:', err);
+      log('PeerJS error:', err);
       setError('WebRTC error: ' + err.type);
     });
 
-    return () => peer.destroy();
-  }, [socket, myStream]);
+    return () => {
+      log('Destroying peer');
+      peer.destroy();
+      setIsPeerReady(false);
+    };
+  }, [socket, myStream, log]);
 
   // Get user media
   useEffect(() => {
+    log('Requesting camera/mic permissions');
     navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       .then(stream => {
+        log('Got local stream');
         setMyStream(stream);
-        if (myVideoRef.current) myVideoRef.current.srcObject = stream;
+        if (myVideoRef.current) {
+          myVideoRef.current.srcObject = stream;
+        }
       })
       .catch(err => {
-        console.error('Media error:', err);
-        setError('Camera/mic permission denied');
+        log('Media error:', err);
+        setError('Camera/mic permission denied or not available');
       });
-  }, []);
+  }, [log]);
 
-  // Call new users
+  // Call new users when they join (only when peer is ready and we have stream)
   useEffect(() => {
-    if (!peer || !myStream) return;
+    if (!isPeerReady || !myStream || !peerId) {
+      log('Not ready to call: peerReady=%s, hasStream=%s, peerId=%s', isPeerReady, !!myStream, peerId);
+      return;
+    }
     users.forEach(user => {
-      if (user.peerId && !remoteStreams[user.peerId] && user.peerId !== peer.id) {
+      if (!user.peerId) {
+        log('User has no peerId:', user);
+        return;
+      }
+      if (user.peerId === peerId) {
+        log('Skipping self:', user.peerId);
+        return;
+      }
+      if (remoteStreams[user.peerId]) {
+        // Already have stream from this user
+        return;
+      }
+      log('Calling user:', user.peerId);
+      try {
         const call = peer.call(user.peerId, myStream);
         call.on('stream', (remoteStream) => {
+          log('Stream from', user.peerId, 'received');
           setRemoteStreams(prev => ({ ...prev, [user.peerId]: remoteStream }));
         });
+        call.on('error', (err) => {
+          log('Call error with', user.peerId, err);
+        });
+      } catch (err) {
+        log('Exception during call:', err);
       }
     });
-  }, [users, peer, myStream, remoteStreams]);
+  }, [users, isPeerReady, myStream, peerId, peer, remoteStreams, log]);
 
   // Player actions
   const handlePlay = () => {
@@ -218,7 +270,7 @@ export default function Room() {
                 style={{ position: 'absolute', top: 0, left: 0 }}
                 config={{
                   youtube: {
-                    playerVars: { modestbranding: 1 } // removed autoplay
+                    playerVars: { modestbranding: 1 }
                   }
                 }}
               />
@@ -235,14 +287,25 @@ export default function Room() {
             {Object.entries(remoteStreams).map(([peerId, stream]) => (
               <Draggable key={peerId} bounds="parent">
                 <div className="pointer-events-auto w-48 h-36 bg-gray-800 rounded-lg overflow-hidden shadow-lg cursor-move border-2 border-blue-500">
-                  <video ref={el => { if (el) el.srcObject = stream; }} autoPlay playsInline className="w-full h-full object-cover" />
+                  <video
+                    ref={el => { if (el) el.srcObject = stream; }}
+                    autoPlay
+                    playsInline
+                    className="w-full h-full object-cover"
+                  />
                 </div>
               </Draggable>
             ))}
             {myStream && (
               <Draggable bounds="parent">
                 <div className="pointer-events-auto w-48 h-36 bg-gray-800 rounded-lg overflow-hidden shadow-lg cursor-move border-2 border-green-500">
-                  <video ref={myVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+                  <video
+                    ref={myVideoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover"
+                  />
                 </div>
               </Draggable>
             )}
