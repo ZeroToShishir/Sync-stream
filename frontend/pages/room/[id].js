@@ -16,22 +16,22 @@ export default function Room() {
   const [myStream, setMyStream] = useState(null);
   const [peer, setPeer] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState({});
+  const [buffering, setBuffering] = useState(false);
+  const [error, setError] = useState(null);
   const playerRef = useRef(null);
   const myVideoRef = useRef(null);
-
-  // Generate a random user ID (persist in session? not needed for demo)
   const userIdRef = useRef(Math.random().toString(36).substring(2, 8));
+  const [activeTab, setActiveTab] = useState('media'); // 'media', 'users', 'settings'
 
-  // Connect to Socket.io server
+  // Connect to Socket.io
   useEffect(() => {
     if (!id) return;
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL; // e.g., https://sync-stream-backend.onrender.com
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
     const socket = io(backendUrl);
     setSocket(socket);
 
     socket.on('connect', () => {
       console.log('Connected to server');
-      // Join the room after we get peerId (peer will be created later, but we can join after)
     });
 
     socket.on('room-state', (state) => {
@@ -64,9 +64,7 @@ export default function Room() {
       }
     });
 
-    // WebRTC signaling
     socket.on('signal', ({ fromPeerId, signal }) => {
-      // Accept the call
       if (peer) {
         const call = peer.call(fromPeerId, myStream);
         call.on('stream', (remoteStream) => {
@@ -75,18 +73,15 @@ export default function Room() {
       }
     });
 
-    return () => {
-      socket.disconnect();
-    };
+    return () => socket.disconnect();
   }, [id]);
 
   // Set up PeerJS
   useEffect(() => {
-    const peer = new Peer(); // uses public PeerServer (for production, consider hosting your own)
+    const peer = new Peer();
     setPeer(peer);
 
     peer.on('open', (peerId) => {
-      // Now we can join the room with our peerId
       if (socket) {
         socket.emit('join-room', {
           roomId: id,
@@ -106,7 +101,7 @@ export default function Room() {
     return () => peer.destroy();
   }, [socket, myStream]);
 
-  // Get user media (camera/mic)
+  // Get user media
   useEffect(() => {
     navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       .then(stream => {
@@ -116,7 +111,7 @@ export default function Room() {
       .catch(err => console.error('media error', err));
   }, []);
 
-  // When a new user joins, call them (if we already have peer and stream)
+  // Call new users
   useEffect(() => {
     if (!peer || !myStream) return;
     users.forEach(user => {
@@ -129,7 +124,7 @@ export default function Room() {
     });
   }, [users, peer, myStream, remoteStreams]);
 
-  // Handle player actions
+  // Player actions
   const handlePlay = () => {
     setIsPlaying(true);
     socket?.emit('action', { type: 'play', seconds: playerRef.current.getCurrentTime() });
@@ -149,110 +144,209 @@ export default function Room() {
     socket?.emit('action', { type: 'media', url });
   };
 
-  // Screenshare (room creator only - simple check using first user? Not robust)
-  const startScreenshare = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-      // Replace video track in all peer connections
-      // For simplicity, we'll just replace our local stream and renegotiate? 
-      // Better: create a new stream and update tracks. This is a bit advanced; for brevity, we'll skip full implementation here.
-      alert('Screenshare started (simplified demo)');
-    } catch (err) {
-      console.error(err);
-    }
+  const handleBuffer = () => setBuffering(true);
+  const handleBufferEnd = () => setBuffering(false);
+  const handleError = (e) => setError('Failed to load media. Try a different URL.');
+
+  // Copy room link
+  const copyRoomLink = () => {
+    navigator.clipboard.writeText(window.location.href);
+    alert('Link copied!');
   };
 
   return (
-    <div className="flex h-screen bg-gray-900 text-white">
-      {/* Main video area */}
-      <div className="flex-1 relative">
-        <ReactPlayer
-          ref={playerRef}
-          url={mediaUrl}
-          playing={isPlaying}
-          onPlay={handlePlay}
-          onPause={handlePause}
-          onSeek={handleSeek}
-          width="100%"
-          height="100%"
-          style={{ position: 'absolute', top: 0, left: 0 }}
-          config={{
-            youtube: {
-              playerVars: { modestbranding: 1, autoplay: 1 }
-            }
-          }}
-        />
-
-        {/* Floating video tiles (draggable) */}
-        <div className="absolute top-4 right-4 space-y-2 pointer-events-none">
-          {Object.entries(remoteStreams).map(([peerId, stream]) => (
-            <Draggable key={peerId} bounds="parent">
-              <div className="pointer-events-auto w-48 h-36 bg-gray-800 rounded-lg overflow-hidden shadow-lg cursor-move">
-                <video
-                  ref={el => { if (el) el.srcObject = stream; }}
-                  autoPlay
-                  playsInline
-                  className="w-full h-full object-cover"
-                />
-              </div>
-            </Draggable>
-          ))}
-          {myStream && (
-            <Draggable bounds="parent">
-              <div className="pointer-events-auto w-48 h-36 bg-gray-800 rounded-lg overflow-hidden shadow-lg cursor-move">
-                <video
-                  ref={myVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover"
-                />
-              </div>
-            </Draggable>
-          )}
+    <div className="h-screen flex flex-col bg-gray-900 text-white">
+      {/* Top bar */}
+      <div className="bg-gray-800 p-3 flex items-center justify-between shadow-lg">
+        <div className="flex items-center space-x-4">
+          <h1 className="text-xl font-bold">Sync Stream</h1>
+          <div className="bg-gray-700 px-3 py-1 rounded text-sm">
+            Room: {id}
+          </div>
+          <button
+            onClick={copyRoomLink}
+            className="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-sm"
+          >
+            Copy Invite Link
+          </button>
+        </div>
+        <div className="text-sm text-gray-300">
+          {users.length + 1} online
         </div>
       </div>
 
-      {/* Right sidebar */}
-      <div className="w-80 bg-gray-800 p-4 flex flex-col">
-        <div>
-          <h3 className="font-semibold mb-2">Online ({users.length})</h3>
-          <ul className="space-y-1">
-            {users.map(user => (
-              <li key={user.userId} className="flex items-center">
-                <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
-                {user.userId}
-              </li>
+      {/* Main content */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Video area */}
+        <div className="flex-1 relative bg-black">
+          {error ? (
+            <div className="absolute inset-0 flex items-center justify-center text-red-400">
+              {error}
+            </div>
+          ) : (
+            <>
+              <ReactPlayer
+                ref={playerRef}
+                url={mediaUrl}
+                playing={isPlaying}
+                onPlay={handlePlay}
+                onPause={handlePause}
+                onSeek={handleSeek}
+                onBuffer={handleBuffer}
+                onBufferEnd={handleBufferEnd}
+                onError={handleError}
+                width="100%"
+                height="100%"
+                style={{ position: 'absolute', top: 0, left: 0 }}
+                config={{
+                  youtube: {
+                    playerVars: { modestbranding: 1, autoplay: 1 }
+                  }
+                }}
+              />
+              {buffering && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
+                  <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Floating video tiles */}
+          <div className="absolute top-4 right-4 space-y-2 pointer-events-none z-10">
+            {Object.entries(remoteStreams).map(([peerId, stream]) => (
+              <Draggable key={peerId} bounds="parent">
+                <div className="pointer-events-auto w-48 h-36 bg-gray-800 rounded-lg overflow-hidden shadow-lg cursor-move border-2 border-blue-500">
+                  <video
+                    ref={el => { if (el) el.srcObject = stream; }}
+                    autoPlay
+                    playsInline
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+              </Draggable>
             ))}
-          </ul>
+            {myStream && (
+              <Draggable bounds="parent">
+                <div className="pointer-events-auto w-48 h-36 bg-gray-800 rounded-lg overflow-hidden shadow-lg cursor-move border-2 border-green-500">
+                  <video
+                    ref={myVideoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+              </Draggable>
+            )}
+          </div>
         </div>
 
-        <div className="mt-4">
-          <h3 className="font-semibold mb-2">Add Media</h3>
-          <input
-            type="text"
-            placeholder="Paste YouTube or video URL"
-            className="w-full bg-gray-700 px-3 py-2 rounded"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleAddMedia(e.target.value);
-            }}
-          />
-        </div>
+        {/* Right sidebar with tabs */}
+        <div className="w-80 bg-gray-800 flex flex-col border-l border-gray-700">
+          {/* Tab headers */}
+          <div className="flex border-b border-gray-700">
+            <button
+              onClick={() => setActiveTab('media')}
+              className={`flex-1 py-3 text-sm font-medium ${activeTab === 'media' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              Media
+            </button>
+            <button
+              onClick={() => setActiveTab('users')}
+              className={`flex-1 py-3 text-sm font-medium ${activeTab === 'users' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              Users ({users.length + 1})
+            </button>
+            <button
+              onClick={() => setActiveTab('settings')}
+              className={`flex-1 py-3 text-sm font-medium ${activeTab === 'settings' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              Settings
+            </button>
+          </div>
 
-        <div className="mt-4">
-          <h3 className="font-semibold mb-2">Controls</h3>
-          <button
-            onClick={() => handleAddMedia('https://www.youtube.com/watch?v=dQw4w9WgXcQ')}
-            className="w-full bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded mb-2"
-          >
-            Play Rick Roll (demo)
-          </button>
-          <button
-            onClick={startScreenshare}
-            className="w-full bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded"
-          >
-            Start Screenshare (creator only)
-          </button>
+          {/* Tab content */}
+          <div className="flex-1 overflow-y-auto p-4">
+            {activeTab === 'media' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium mb-1">YouTube / Video URL</label>
+                  <input
+                    type="text"
+                    placeholder="Paste link and press Enter"
+                    className="w-full bg-gray-700 px-3 py-2 rounded text-sm"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && e.target.value) {
+                        handleAddMedia(e.target.value);
+                        e.target.value = '';
+                      }
+                    }}
+                  />
+                </div>
+                <div>
+                  <button
+                    onClick={() => handleAddMedia('https://www.youtube.com/watch?v=dQw4w9WgXcQ')}
+                    className="w-full bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm"
+                  >
+                    🎵 Play Rick Roll (demo)
+                  </button>
+                </div>
+                <div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+                        // In a real app, you'd replace tracks in peer connections
+                        alert('Screenshare started (simplified demo)');
+                      } catch (err) {
+                        console.error(err);
+                      }
+                    }}
+                    className="w-full bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded text-sm"
+                  >
+                    🖥️ Start Screenshare (creator only)
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'users' && (
+              <div>
+                <h3 className="font-semibold mb-2">In Room</h3>
+                <ul className="space-y-2">
+                  <li className="flex items-center">
+                    <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                    You ({userIdRef.current})
+                  </li>
+                  {users.map(user => (
+                    <li key={user.userId} className="flex items-center">
+                      <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                      {user.userId}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {activeTab === 'settings' && (
+              <div className="space-y-3">
+                <div>
+                  <label className="flex items-center">
+                    <input type="checkbox" className="mr-2" /> Mute all
+                  </label>
+                </div>
+                <div>
+                  <label className="flex items-center">
+                    <input type="checkbox" className="mr-2" /> Hide self view
+                  </label>
+                </div>
+                <div className="text-sm text-gray-400">
+                  More options coming soon...
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
