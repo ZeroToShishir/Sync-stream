@@ -30,7 +30,7 @@ io.on('connection', (socket) => {
     if (!rooms[roomId]) {
       rooms[roomId] = {
         users: {},
-        mediaUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', // default
+        mediaUrl: null, // default
         isPlaying: false,
         currentTime: 0
       };
