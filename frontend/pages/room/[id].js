@@ -18,23 +18,38 @@ export default function Room() {
   const [remoteStreams, setRemoteStreams] = useState({});
   const [buffering, setBuffering] = useState(false);
   const [error, setError] = useState(null);
+  const [activeTab, setActiveTab] = useState('media');
   const playerRef = useRef(null);
   const myVideoRef = useRef(null);
   const userIdRef = useRef(Math.random().toString(36).substring(2, 8));
-  const [activeTab, setActiveTab] = useState('media'); // 'media', 'users', 'settings'
+
+  // Log every state change for debugging
+  useEffect(() => {
+    console.log('Room ID:', id);
+    console.log('User ID:', userIdRef.current);
+  }, [id]);
 
   // Connect to Socket.io
   useEffect(() => {
-    if (!id) return;
+    if (!id) {
+      console.log('No room ID yet');
+      return;
+    }
     const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
+    if (!backendUrl) {
+      setError('Backend URL not configured');
+      return;
+    }
+    console.log('Connecting to backend:', backendUrl);
     const socket = io(backendUrl);
     setSocket(socket);
 
     socket.on('connect', () => {
-      console.log('Connected to server');
+      console.log('Socket connected with ID:', socket.id);
     });
 
     socket.on('room-state', (state) => {
+      console.log('Received room state:', state);
       setMediaUrl(state.mediaUrl);
       setIsPlaying(state.isPlaying);
       setCurrentTime(state.currentTime);
@@ -44,18 +59,22 @@ export default function Room() {
     });
 
     socket.on('existing-users', (existing) => {
+      console.log('Existing users:', existing);
       setUsers(existing);
     });
 
     socket.on('user-joined', (user) => {
+      console.log('User joined:', user);
       setUsers(prev => [...prev, user]);
     });
 
     socket.on('user-left', (userId) => {
+      console.log('User left:', userId);
       setUsers(prev => prev.filter(u => u.userId !== userId));
     });
 
     socket.on('sync', (state) => {
+      console.log('Sync event:', state);
       setMediaUrl(state.mediaUrl);
       setIsPlaying(state.isPlaying);
       setCurrentTime(state.currentTime);
@@ -65,94 +84,159 @@ export default function Room() {
     });
 
     socket.on('signal', ({ fromPeerId, signal }) => {
+      console.log('Signal from:', fromPeerId, signal);
       if (peer) {
-        const call = peer.call(fromPeerId, myStream);
-        call.on('stream', (remoteStream) => {
-          setRemoteStreams(prev => ({ ...prev, [fromPeerId]: remoteStream }));
-        });
+        peer.call(fromPeerId, myStream);
       }
     });
 
-    return () => socket.disconnect();
+    socket.on('disconnect', () => {
+      console.log('Socket disconnected');
+    });
+
+    socket.on('connect_error', (err) => {
+      console.error('Socket connection error:', err);
+      setError('Failed to connect to server');
+    });
+
+    return () => {
+      console.log('Cleaning up socket');
+      socket.disconnect();
+    };
   }, [id]);
 
   // Set up PeerJS
   useEffect(() => {
+    if (!socket) {
+      console.log('No socket yet, skipping Peer init');
+      return;
+    }
+    console.log('Initializing PeerJS');
     const peer = new Peer();
     setPeer(peer);
 
     peer.on('open', (peerId) => {
-      if (socket) {
-        socket.emit('join-room', {
-          roomId: id,
-          userId: userIdRef.current,
-          peerId
-        });
-      }
-    });
-
-    peer.on('call', (call) => {
-      call.answer(myStream);
-      call.on('stream', (remoteStream) => {
-        setRemoteStreams(prev => ({ ...prev, [call.peer]: remoteStream }));
+      console.log('PeerJS open with ID:', peerId);
+      // Join the room with our peerId
+      socket.emit('join-room', {
+        roomId: id,
+        userId: userIdRef.current,
+        peerId
       });
     });
 
-    return () => peer.destroy();
+    peer.on('call', (call) => {
+      console.log('Incoming call from:', call.peer);
+      if (myStream) {
+        call.answer(myStream);
+        call.on('stream', (remoteStream) => {
+          console.log('Received remote stream from:', call.peer);
+          setRemoteStreams(prev => ({ ...prev, [call.peer]: remoteStream }));
+        });
+      } else {
+        console.log('No local stream yet, rejecting call?');
+      }
+    });
+
+    peer.on('error', (err) => {
+      console.error('PeerJS error:', err);
+      setError('WebRTC error: ' + err.type);
+    });
+
+    return () => {
+      console.log('Destroying peer');
+      peer.destroy();
+    };
   }, [socket, myStream]);
 
   // Get user media
   useEffect(() => {
+    console.log('Requesting camera/mic permissions');
     navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       .then(stream => {
+        console.log('Got local stream');
         setMyStream(stream);
-        if (myVideoRef.current) myVideoRef.current.srcObject = stream;
+        if (myVideoRef.current) {
+          myVideoRef.current.srcObject = stream;
+        }
       })
-      .catch(err => console.error('media error', err));
+      .catch(err => {
+        console.error('Media error:', err);
+        setError('Camera/mic permission denied or not available');
+      });
   }, []);
 
-  // Call new users
+  // Call new users when they join
   useEffect(() => {
-    if (!peer || !myStream) return;
+    if (!peer || !myStream) {
+      console.log('Peer or stream not ready for calling');
+      return;
+    }
     users.forEach(user => {
       if (user.peerId && !remoteStreams[user.peerId] && user.peerId !== peer.id) {
+        console.log('Calling new user:', user.peerId);
         const call = peer.call(user.peerId, myStream);
         call.on('stream', (remoteStream) => {
+          console.log('Stream from', user.peerId, 'received');
           setRemoteStreams(prev => ({ ...prev, [user.peerId]: remoteStream }));
         });
       }
     });
   }, [users, peer, myStream, remoteStreams]);
 
-  // Player actions
+  // Player event handlers
   const handlePlay = () => {
+    console.log('Play at', playerRef.current?.getCurrentTime());
     setIsPlaying(true);
-    socket?.emit('action', { type: 'play', seconds: playerRef.current.getCurrentTime() });
+    socket?.emit('action', { type: 'play', seconds: playerRef.current?.getCurrentTime() });
   };
 
   const handlePause = () => {
+    console.log('Pause at', playerRef.current?.getCurrentTime());
     setIsPlaying(false);
-    socket?.emit('action', { type: 'pause', seconds: playerRef.current.getCurrentTime() });
+    socket?.emit('action', { type: 'pause', seconds: playerRef.current?.getCurrentTime() });
   };
 
   const handleSeek = (seconds) => {
+    console.log('Seek to', seconds);
     socket?.emit('action', { type: 'seek', seconds });
   };
 
   const handleAddMedia = (url) => {
+    console.log('Adding media:', url);
     setMediaUrl(url);
     socket?.emit('action', { type: 'media', url });
   };
 
   const handleBuffer = () => setBuffering(true);
   const handleBufferEnd = () => setBuffering(false);
-  const handleError = (e) => setError('Failed to load media. Try a different URL.');
+  const handleError = (e) => {
+    console.error('Player error:', e);
+    setError('Failed to load media. Try a different URL.');
+  };
 
-  // Copy room link
   const copyRoomLink = () => {
     navigator.clipboard.writeText(window.location.href);
     alert('Link copied!');
   };
+
+  // If there's a fatal error, show it prominently
+  if (error) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-900 text-white">
+        <div className="bg-red-900 p-6 rounded-lg max-w-md">
+          <h2 className="text-xl font-bold mb-4">Error</h2>
+          <p>{error}</p>
+          <button
+            onClick={() => router.push('/')}
+            className="mt-4 bg-blue-600 px-4 py-2 rounded"
+          >
+            Go Home
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen flex flex-col bg-gray-900 text-white">
@@ -177,39 +261,31 @@ export default function Room() {
 
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Video area */}
+        {/* Video area - make sure it's visible */}
         <div className="flex-1 relative bg-black">
-          {error ? (
-            <div className="absolute inset-0 flex items-center justify-center text-red-400">
-              {error}
+          <ReactPlayer
+            ref={playerRef}
+            url={mediaUrl}
+            playing={isPlaying}
+            onPlay={handlePlay}
+            onPause={handlePause}
+            onSeek={handleSeek}
+            onBuffer={handleBuffer}
+            onBufferEnd={handleBufferEnd}
+            onError={handleError}
+            width="100%"
+            height="100%"
+            style={{ position: 'absolute', top: 0, left: 0 }}
+            config={{
+              youtube: {
+                playerVars: { modestbranding: 1, autoplay: 1 }
+              }
+            }}
+          />
+          {buffering && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
+              <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
             </div>
-          ) : (
-            <>
-              <ReactPlayer
-                ref={playerRef}
-                url={mediaUrl}
-                playing={isPlaying}
-                onPlay={handlePlay}
-                onPause={handlePause}
-                onSeek={handleSeek}
-                onBuffer={handleBuffer}
-                onBufferEnd={handleBufferEnd}
-                onError={handleError}
-                width="100%"
-                height="100%"
-                style={{ position: 'absolute', top: 0, left: 0 }}
-                config={{
-                  youtube: {
-                    playerVars: { modestbranding: 1, autoplay: 1 }
-                  }
-                }}
-              />
-              {buffering && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
-                  <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
-                </div>
-              )}
-            </>
           )}
 
           {/* Floating video tiles */}
@@ -242,7 +318,7 @@ export default function Room() {
           </div>
         </div>
 
-        {/* Right sidebar with tabs */}
+        {/* Right sidebar - give it a distinct color to verify it's there */}
         <div className="w-80 bg-gray-800 flex flex-col border-l border-gray-700">
           {/* Tab headers */}
           <div className="flex border-b border-gray-700">
@@ -297,7 +373,6 @@ export default function Room() {
                     onClick={async () => {
                       try {
                         const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-                        // In a real app, you'd replace tracks in peer connections
                         alert('Screenshare started (simplified demo)');
                       } catch (err) {
                         console.error(err);
